@@ -17,6 +17,9 @@ map $http_upgrade $connection_upgrade {
 server {
 	listen 443 ssl http2;
 	server_name {{ name }};
+	# Extra hostnames for this agent (e.g. one box serving the Server, Database Server and
+	# Proxy Server roles). Operator-owned; lives outside config.json so setup config can't drop it.
+	include {{ nginx_directory }}/server-names/*.conf;
 
 	ssl_certificate {{ tls_directory }}/fullchain.pem;
 	ssl_certificate_key {{ tls_directory }}/privkey.pem;

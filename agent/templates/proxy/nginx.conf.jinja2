@@ -23,7 +23,9 @@ set_real_ip_from 2405:b500::/32;
 set_real_ip_from 2405:8100::/32;
 set_real_ip_from 2a06:98c0::/29;
 set_real_ip_from 2c0f:f248::/32;
-real_ip_header CF-Connecting-IP;
+# real_ip_header CF-Connecting-IP is set per public server block below, not at http
+# level: on a host that is also an app server, nginx.conf sets real_ip_header X-Real-IP
+# at http level, and two http-level real_ip_header directives fail nginx -t.
 
 map $host $subdomain_map {
     ~^(?<subdomain>[^.]*).*$ $subdomain.{{ domain }};
@@ -136,6 +138,7 @@ proxy_cache_path /tmp/cache keys_zone=proxy_cache_zone:10m loader_threshold=300 
 
 server {
 	listen 443 http2 ssl{% if ns.host.strip("*.") == domain %} default_server{% endif %};
+	real_ip_header CF-Connecting-IP;
 	server_name {{ ns.host }};
 
 	{%- for wildcard_domain in wildcards -%}
@@ -274,6 +277,7 @@ server {
 
 server {
 	listen 80;
+	real_ip_header CF-Connecting-IP;
 	server_name _;
 
 	location ^~ /.well-known/acme-challenge/ {
