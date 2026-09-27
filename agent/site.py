@@ -61,6 +61,11 @@ class Site(Base):
     def bench_execute(self, command, input=None):
         return self.bench.docker_execute(f"bench --site {self.name} {command}", input=input)
 
+    def bench_execute_with_secrets(self, command, secret_args: list[str]):
+        # `bench --site {name} {command} {secret_args...}` with the secrets on stdin
+        # (Bench.docker_bench_execute_with_secrets).
+        return self.bench.docker_bench_execute_with_secrets(f"--site {self.name} {command}", secret_args)
+
     def dump(self):
         return {"name": self.name}
 
@@ -129,14 +134,13 @@ class Site(Base):
             self.name, mariadb_root_password, self.database
         )
         try:
-            return self.bench_execute(
+            return self.bench_execute_with_secrets(
                 "--force restore "
                 f"--mariadb-root-username {temp_user} "
-                f"--mariadb-root-password {temp_password} "
-                f"--admin-password {admin_password} "
                 f"{public_file_option} "
                 f"{private_file_option} "
-                f"{database_file}"
+                f"{database_file}",
+                [f"--mariadb-root-password={temp_password}", f"--admin-password={admin_password}"],
             )
         finally:
             self.bench.drop_mariadb_user(self.name, mariadb_root_password, self.database)
@@ -295,11 +299,9 @@ class Site(Base):
             self.name, mariadb_root_password, self.database
         )
         try:
-            return self.bench_execute(
-                f"reinstall --yes "
-                f"--mariadb-root-username {temp_user} "
-                f"--mariadb-root-password {temp_password} "
-                f"--admin-password {admin_password}"
+            return self.bench_execute_with_secrets(
+                f"reinstall --yes --mariadb-root-username {temp_user}",
+                [f"--mariadb-root-password={temp_password}", f"--admin-password={admin_password}"],
             )
         finally:
             self.bench.drop_mariadb_user(self.name, mariadb_root_password, self.database)
@@ -688,7 +690,7 @@ class Site(Base):
 
     @step("Set Administrator Password")
     def set_admin_password(self, password):
-        return self.bench_execute(f"set-admin-password {password}")
+        return self.bench_execute_with_secrets("set-admin-password", ["--", password])
 
     @step("Wait for Enqueued Jobs")
     def wait_till_ready(self):

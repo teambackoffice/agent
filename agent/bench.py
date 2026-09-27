@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import string
 import tempfile
@@ -41,6 +42,23 @@ if TYPE_CHECKING:
         setup_requirements_python: bool
         rebuild_frontend: bool
         migrate_sites: bool
+
+
+# Runs what `bench <command>` execs into (frappe.utils.bench_helper, from sites/), with the
+# secret arguments read from stdin (a JSON list, appended to the command's argv). The bench CLI
+# writes its full argv to logs/bench.log, and execute() records and logs the command (worker
+# stdout log, step data) and it shows in `ps`.
+STDIN_SECRETS_BENCH_HELPER = """
+import json, os, sys, warnings
+secret_args = json.load(sys.stdin)
+os.chdir("sites")
+sys.argv = [sys.argv[0], "frappe", *sys.argv[1:], *secret_args]
+import frappe
+if not frappe._dev_server:
+    warnings.simplefilter("ignore")
+from frappe.utils.bench_helper import main
+main()
+"""
 
 
 class Bench(Base):
@@ -203,15 +221,22 @@ class Bench(Base):
     def bench_new_site(self, name, mariadb_root_password, admin_password):
         site_database, temp_user, temp_password = self.create_mariadb_user(name, mariadb_root_password)
         try:
-            return self.docker_execute(
-                f"bench new-site --no-mariadb-socket "
-                f"--mariadb-root-username {temp_user} "
-                f"--mariadb-root-password {temp_password} "
-                f"--admin-password {admin_password} "
-                f"--db-name {site_database} {name}"
+            return self.docker_bench_execute_with_secrets(
+                f"new-site --no-mariadb-socket --mariadb-root-username {temp_user} "
+                f"--db-name {site_database} {name}",
+                [f"--mariadb-root-password={temp_password}", f"--admin-password={admin_password}"],
             )
         finally:
             self.drop_mariadb_user(name, mariadb_root_password, site_database)
+
+    def docker_bench_execute_with_secrets(self, command, secret_args: list[str]):
+        # Like `bench {command} {secret_args...}`, but the secret arguments go on stdin
+        # (see STDIN_SECRETS_BENCH_HELPER), so they're in no command line, log or file.
+        # Pass options as "--option=value"; put "--" before a secret positional argument.
+        return self.docker_execute(
+            f"env/bin/python -c {shlex.quote(STDIN_SECRETS_BENCH_HELPER)} {command}",
+            input=json.dumps(secret_args),
+        )
 
     @job("Create User", priority="high")
     def create_user(
