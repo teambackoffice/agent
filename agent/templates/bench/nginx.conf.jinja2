@@ -52,6 +52,17 @@ map $cors_origin_{{ bench_name_slug }} $cors_vary_{{ bench_name_slug }} {
 	default "Origin";
 }
 {% endif %}
+{%- if proxy_ip and not standalone %}
+
+# where this bench shares nginx with the proxy, public port 80 reaches the server block
+# below directly and skips the proxy. flag requests whose connection didn't come from
+# proxy_ip: $realip_remote_addr is the connection's source even after realip has
+# rewritten $remote_addr from X-Real-IP
+geo $realip_remote_addr $bypasses_proxy_{{ bench_name_slug }} {
+	default 1;
+	{{ proxy_ip }} 0;
+}
+{%- endif %}
 
 # server blocks
 {% if sites -%}
@@ -257,6 +268,13 @@ server {
 		;
 
 	root {{ sites_directory }};
+
+	{% if proxy_ip -%}
+	# send anything that didn't come through the proxy back through it, over https
+	if ($bypasses_proxy_{{ bench_name_slug }}) {
+		return 301 https://$host$request_uri;
+	}
+	{%- endif %}
 
 	add_header X-Frame-Options "SAMEORIGIN";
 	add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload";
