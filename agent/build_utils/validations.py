@@ -165,8 +165,10 @@ def get_python_path(dirpath: str) -> str:
                     python_path = shutil.which("python3.14")
                     if python_path:
                         return python_path
-                    # Temporary hardcoding until python 3.14 until we move to build server
-                    return "/usr/bin/python3.14"
+                    # No python3.14 on this build server (none of Press's plays install it):
+                    # fall back to the agent's own python below rather than to a path that
+                    # doesn't exist, which fails every build of an app allowing 3.14 with
+                    # FileNotFoundError.
 
     return _get_server_python_path()
 
