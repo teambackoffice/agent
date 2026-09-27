@@ -813,11 +813,11 @@ class PatchImageBuilder(Base, JobMixin):
     @step("Start Base Container")
     def _start_base_container(self):
         """Docker login and pull base image"""
+        # password on stdin, not in the (logged) command: see Server.docker_login
         self.execute(
-            f"docker login "
-            f"-u {self.registry['username']} "
-            f"-p {self.registry['password']} "
-            f"{self.registry['url']}"
+            f"docker login -u {shlex.quote(self.registry['username'])} "
+            f"--password-stdin {shlex.quote(self.registry['url'])}",
+            input=self.registry["password"],
         )
         self.execute(f"docker pull {self.base_image}")
         self.execute(f"docker run -d --name {self.container_name} {self.base_image} tail -f /dev/null")
