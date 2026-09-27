@@ -280,9 +280,7 @@ class Bench(Base):
             f"GRANT ALL ON {database}.* TO '{user}'@'%' WITH GRANT OPTION",
             "FLUSH PRIVILEGES",
         ]
-        for query in queries:
-            command = f'mysql -h {self.host} -P {self.db_port} -uroot -p{mariadb_root_password} -e "{query}"'
-            self.execute(command)
+        self._run_as_mariadb_root(mariadb_root_password, queries)
         return database, user, password
 
     def drop_mariadb_user(self, site, mariadb_root_password, database=None):
@@ -293,9 +291,23 @@ class Bench(Base):
             f"DROP USER IF EXISTS '{user}'@'%'",
             "FLUSH PRIVILEGES",
         ]
-        for query in queries:
-            command = f'mysql -h {self.host} -P {self.db_port} -uroot -p{mariadb_root_password} -e "{query}"'
-            self.execute(command)
+        self._run_as_mariadb_root(mariadb_root_password, queries)
+
+    def _run_as_mariadb_root(self, mariadb_root_password, queries):
+        # Root's password goes in a 0600 defaults file and the SQL (which can carry the temporary
+        # user's password) on stdin, so neither is in the command: execute() records and logs the
+        # command (worker stdout log, step data), and `-p<password>` was visible in `ps`.
+        with tempfile.TemporaryDirectory() as directory:
+            defaults_file = os.path.join(directory, "root.cnf")
+            fd = os.open(defaults_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                escaped = mariadb_root_password.replace("\\", "\\\\").replace('"', '\\"')
+                f.write(f'[client]\npassword="{escaped}"\n')
+            sql = "".join(f"{query};\n" for query in queries)
+            self.execute(
+                f"mysql --defaults-extra-file={defaults_file} -h {self.host} -P {self.db_port} -uroot",
+                input=sql,
+            )
 
     def fetch_monitor_data(self):
         lines = []
