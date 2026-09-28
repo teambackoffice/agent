@@ -369,9 +369,15 @@ class ValidationManager(Base, JobMixin):
         return sv_actual in sv_expected
 
     def _validate_repositories(self):
+        # Check each app's syntax against the image's python, not whatever the build server has
+        try:
+            target_python = self.get_dependency_version("python")
+        except Exception:
+            target_python = None
+
         invalid_releases = []
         for app, pm in self.pmf.items():
-            invalidation_reason = check_python_syntax(pm["repo_path"])
+            invalidation_reason = check_python_syntax(pm["repo_path"], target_python)
 
             if invalidation_reason:
                 app_info = next((info for info in self.clone_instructions if info["app"] == app), None)

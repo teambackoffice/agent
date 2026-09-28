@@ -124,7 +124,7 @@ def get_package_manager_files(repo_path_map: dict[str, str]) -> PackageManagerFi
     return pfiles_map
 
 
-def check_python_syntax(dirpath: str) -> str:
+def check_python_syntax(dirpath: str, target_python: str | None = None) -> str:
     """
     Script `compileall` will compile all the Python files
     in the given directory.
@@ -134,13 +134,16 @@ def check_python_syntax(dirpath: str) -> str:
     Flags:
     - -q: quiet, only print errors (stdout)
     - -o: optimize level, 0 is no optimization
+
+    `target_python` is the image's python version (the build's PYTHON_VERSION, e.g. "3.14").
     """
-    _python = get_python_path(dirpath)
+    _python = get_python_path(dirpath, target_python)
     if _python is None:
-        # No python on this build server satisfies the app's requires-python (a Frappe v16 app
-        # needs 3.14; the agent runs the server's 3.10). Compiling with an older python flags
-        # valid newer syntax (`type` statements, unparenthesized `except`) as errors, so skip this
-        # pre-build check: the image's own python still compiles and imports the code in the build.
+        # No python on this build server can parse code written for the image's python (a Frappe
+        # v16 build targets 3.14; the agent runs the server's 3.10). Compiling with an older python
+        # flags valid newer syntax (`type` statements, unparenthesized `except`, PEP 701 f-strings)
+        # as errors, so skip this pre-build check: the image's own python still compiles and
+        # imports the code in the build.
         return ""
     command = f"{_python} -m compileall -q -o 0 {dirpath}"
     proc = subprocess.run(
@@ -157,10 +160,19 @@ def check_python_syntax(dirpath: str) -> str:
     return proc.stdout
 
 
-def get_python_path(dirpath: str) -> str | None:
-    """Return a python for checking the app's code: python3.14 if the app's requires-python allows
-    3.14 and it's installed, else the agent's own python if that satisfies requires-python, else None
-    (no suitable python on this build server)."""
+def get_python_path(dirpath: str, target_python: str | None = None) -> str | None:
+    """Return a python for checking the app's code, or None if this build server has no suitable one.
+
+    With `target_python` (the image's python version): that version if it's installed, else the
+    nearest newer one (a newer python parses older code; an older one can't parse newer syntax), else
+    the agent's python if it's one minor version older (see _get_python_for_target).
+    Without it: python3.14 if the app's requires-python allows 3.14 and it's installed, else the
+    agent's own python if that satisfies requires-python."""
+    if target_python:
+        target = _parse_minor_version(target_python)
+        if target:
+            return _get_python_for_target(*target)
+
     server_python = _get_server_python_path()
     requires_python = _get_requires_python(dirpath)
     if not requires_python:
@@ -179,6 +191,31 @@ def get_python_path(dirpath: str) -> str | None:
     if version_spec.match(_get_server_python_version()):
         return server_python
 
+    return None
+
+
+def _parse_minor_version(version: str) -> tuple[int, int] | None:
+    """(major, minor) from a version such as "3.14" or "3.14.2"; None if it isn't one"""
+    parts = version.strip().split(".")
+    if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+        return None
+    return int(parts[0]), int(parts[1])
+
+
+def _get_python_for_target(major: int, minor: int) -> str | None:
+    """The agent's python or a pythonX.Y on PATH: the target version itself, else the nearest newer,
+    else the agent's python if it's exactly one minor version older. 3.10 parses 3.11 code apart from
+    `except*` and starred subscripts, so a 3.11 build keeps the check on a 3.10 server; from 3.12 on
+    (PEP 701 f-strings, `type` statements) an older python rejects valid code, so there's none."""
+    server_version = sys.version_info[:2]
+    for candidate_minor in range(minor, minor + 10):
+        if server_version == (major, candidate_minor):
+            return _get_server_python_path()
+        python_path = shutil.which(f"python{major}.{candidate_minor}")
+        if python_path:
+            return python_path
+    if server_version == (major, minor - 1):
+        return _get_server_python_path()
     return None
 
 
