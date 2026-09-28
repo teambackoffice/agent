@@ -483,10 +483,11 @@ class Bench(Base):
         )
         force_flag = "--force" if force else ""
         try:
-            return self.docker_execute(
-                f"bench drop-site --no-backup {force_flag} "
-                f"--root-login {temp_user} --root-password {temp_password} "
-                f"--archived-sites-path archived {name}"
+            # The temporary user's password goes on stdin, not the command line
+            return self.docker_bench_execute_with_secrets(
+                f"drop-site --no-backup {force_flag} --root-login {temp_user} "
+                f"--archived-sites-path archived {name}",
+                [f"--root-password={temp_password}"],
             )
         finally:
             self.drop_mariadb_user(name, mariadb_root_password, site_database)

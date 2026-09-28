@@ -486,19 +486,16 @@ class Site(Base):
     def create_user(self, email, first_name, last_name, password=None):
         first_name = quote(first_name)
         last_name = quote(last_name)
-        if password:
-            password = quote(password)
-        command = f"add-system-manager {email} --first-name {first_name} --last-name {last_name}"
-        if password:
-            command += f" --password {password}"
-        return self.bench_execute(command)
+        command = f"add-system-manager {quote(email)} --first-name {first_name} --last-name {last_name}"
+        # The password goes on stdin, not the command line (bench_execute_with_secrets)
+        return self.bench_execute_with_secrets(command, [f"--password={password}"] if password else [])
 
     @step("Complete Setup Wizard")
     def complete_setup_wizard(self, data):
-        payload = {"args": data}
-        payload = quote(json.dumps(payload))
-        command = f"execute frappe.desk.page.setup_wizard.setup_wizard.setup_complete --kwargs {payload}"
-        return self.bench_execute(command)
+        # The wizard's data includes the user's password: pass it on stdin, not the command line
+        payload = json.dumps({"args": data})
+        command = "execute frappe.desk.page.setup_wizard.setup_wizard.setup_complete"
+        return self.bench_execute_with_secrets(command, [f"--kwargs={payload}"])
 
     @job("Update Site Configuration", priority="high")
     def update_config_job(self, value, remove):
@@ -512,13 +509,17 @@ class Site(Base):
     def reset_site_usage(self):
         pattern = f"{self.database}|rate-limit-counter-[0-9]*"
         password = urlparse(self.bench.config.get("redis_cache")).password
-        password_arg = f"-a '{password}'" if password else ""
-        keys_command = f"redis-cli --raw -p 13000 {password_arg} KEYS '{pattern}'"
-        keys = self.bench.docker_execute(keys_command)
+        # --askpass reads the password from stdin, so it's in no command line or log
+        password_arg, password_input = ("--askpass", password + "\n") if password else ("", None)
+
+        def redis_cli(args):
+            return self.bench.docker_execute(f"redis-cli {password_arg} {args}", input=password_input)
+
+        keys = redis_cli(f"--raw -p 13000 KEYS '{pattern}'")
         data = {"keys": keys, "get": [], "delete": []}
         for key in keys["output"].splitlines():
-            get = self.bench.docker_execute(f"redis-cli -p 13000 {password_arg} GET '{key}'")
-            delete = self.bench.docker_execute(f"redis-cli -p 13000 {password_arg} DEL '{key}'")
+            get = redis_cli(f"-p 13000 GET '{key}'")
+            delete = redis_cli(f"-p 13000 DEL '{key}'")
             data["get"].append(get)
             data["delete"].append(delete)
         return data
