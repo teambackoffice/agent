@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, TypedDict
 
@@ -135,6 +136,12 @@ def check_python_syntax(dirpath: str) -> str:
     - -o: optimize level, 0 is no optimization
     """
     _python = get_python_path(dirpath)
+    if _python is None:
+        # No python on this build server satisfies the app's requires-python (a Frappe v16 app
+        # needs 3.14; the agent runs the server's 3.10). Compiling with an older python flags
+        # valid newer syntax (`type` statements, unparenthesized `except`) as errors, so skip this
+        # pre-build check: the image's own python still compiles and imports the code in the build.
+        return ""
     command = f"{_python} -m compileall -q -o 0 {dirpath}"
     proc = subprocess.run(
         shlex.split(command),
@@ -150,27 +157,45 @@ def check_python_syntax(dirpath: str) -> str:
     return proc.stdout
 
 
-def get_python_path(dirpath: str) -> str:
-    """Check for python version in the pyproject.toml file if present else return bench python path"""
-    pyproject_path = os.path.join(dirpath, "pyproject.toml")
-    if os.path.isfile(pyproject_path):
-        # To handle broken toml files or missing fields
-        with open(pyproject_path, "rb") as f, contextlib.suppress(Exception):
-            pyproject_data = tomli.load(f)
-            requires_python = pyproject_data.get("project", {}).get("requires-python")
-            if requires_python:
-                version_spec = sv.SimpleSpec(requires_python)
-                if version_spec.match(sv.Version("3.14.0")):
-                    # try to resolve python3.14 path
-                    python_path = shutil.which("python3.14")
-                    if python_path:
-                        return python_path
-                    # No python3.14 on this build server (none of Press's plays install it):
-                    # fall back to the agent's own python below rather than to a path that
-                    # doesn't exist, which fails every build of an app allowing 3.14 with
-                    # FileNotFoundError.
+def get_python_path(dirpath: str) -> str | None:
+    """Return a python for checking the app's code: python3.14 if the app's requires-python allows
+    3.14 and it's installed, else the agent's own python if that satisfies requires-python, else None
+    (no suitable python on this build server)."""
+    server_python = _get_server_python_path()
+    requires_python = _get_requires_python(dirpath)
+    if not requires_python:
+        return server_python
 
-    return _get_server_python_path()
+    try:
+        version_spec = sv.SimpleSpec(requires_python)
+    except ValueError:
+        return server_python
+
+    if version_spec.match(sv.Version("3.14.0")):
+        python_path = shutil.which("python3.14")
+        if python_path:
+            return python_path
+
+    if version_spec.match(_get_server_python_version()):
+        return server_python
+
+    return None
+
+
+def _get_requires_python(dirpath: str) -> str | None:
+    """requires-python from the app's pyproject.toml, if it has one"""
+    pyproject_path = os.path.join(dirpath, "pyproject.toml")
+    if not os.path.isfile(pyproject_path):
+        return None
+    # To handle broken toml files or missing fields
+    with open(pyproject_path, "rb") as f, contextlib.suppress(Exception):
+        return tomli.load(f).get("project", {}).get("requires-python")
+    return None
+
+
+def _get_server_python_version() -> sv.Version:
+    """Version of the agent's own python, which runs this code"""
+    return sv.Version(".".join(str(part) for part in sys.version_info[:3]))
 
 
 def _get_server_python_path() -> str:
