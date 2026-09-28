@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -65,6 +66,22 @@ class Site(Base):
         # `bench --site {name} {command} {secret_args...}` with the secrets on stdin
         # (Bench.docker_bench_execute_with_secrets).
         return self.bench.docker_bench_execute_with_secrets(f"--site {self.name} {command}", secret_args)
+
+    @contextlib.contextmanager
+    def _db_client_credentials(self, user: str | None = None):
+        """`--defaults-extra-file=<file>` with the site DB user's credentials, to put first after the
+        mariadb/mysqldump client's name, instead of `-u<user> -p<password>`: execute() records and logs
+        the command (step data, the worker's stdout log, usage.log), and the password was in `ps`. The
+        file is 0600 in a private temporary directory, removed when the block ends."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "client.cnf")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(
+                    f'[client]\nuser="{_option_file_value(user or self.user)}"\n'
+                    f'password="{_option_file_value(self.password)}"\n'
+                )
+            yield f"--defaults-extra-file={quote(path)}"
 
     def dump(self):
         return {"name": self.name}
@@ -459,16 +476,17 @@ class Site(Base):
     @step("Restore Site Tables")
     def restore_site_tables(self):
         data = {"tables": {}}
-        for backup_file in os.listdir(self.backup_directory):
-            backup_file_path = os.path.join(self.backup_directory, backup_file)
-            output = self.execute(
-                "set -o pipefail && "
-                f"gunzip -c '{backup_file_path}' | "
-                f"{db_client_cli()} -h {self.host} -P {self.db_port} -u {self.user} -p{self.password} "
-                f"{self.database}",
-                executable="/bin/bash",
-            )
-            data["tables"][backup_file] = output
+        with self._db_client_credentials() as credentials:
+            for backup_file in os.listdir(self.backup_directory):
+                backup_file_path = os.path.join(self.backup_directory, backup_file)
+                output = self.execute(
+                    "set -o pipefail && "
+                    f"gunzip -c '{backup_file_path}' | "
+                    f"{db_client_cli()} {credentials} -h {self.host} -P {self.db_port} "
+                    f"{self.database}",
+                    executable="/bin/bash",
+                )
+                data["tables"][backup_file] = output
         return data
 
     @step("Update ERPNext Configuration")
@@ -732,17 +750,18 @@ class Site(Base):
         dump_command = db_dump_cli()
 
         data = {"tables": {}}
-        for table in tables:
-            backup_file = os.path.join(self.backup_directory, f"{table}.sql.gz")
-            output = self.execute(
-                "set -o pipefail && "
-                f"{dump_command} --single-transaction --quick --lock-tables=false "
-                f"-h {self.host} -P {self.db_port} -u {self.user} -p{self.password} "
-                f"{self.database} '{table}' "
-                f" | gzip > '{backup_file}'",
-                executable="/bin/bash",
-            )
-            data["tables"][table] = output
+        with self._db_client_credentials() as credentials:
+            for table in tables:
+                backup_file = os.path.join(self.backup_directory, f"{table}.sql.gz")
+                output = self.execute(
+                    "set -o pipefail && "
+                    f"{dump_command} {credentials} --single-transaction --quick --lock-tables=false "
+                    f"-h {self.host} -P {self.db_port} "
+                    f"{self.database} '{table}' "
+                    f" | gzip > '{backup_file}'",
+                    executable="/bin/bash",
+                )
+                data["tables"][table] = output
         return data
 
     @step("Run App Specific Scripts")
@@ -818,17 +837,18 @@ class Site(Base):
 
     def _restore_touched_tables(self):
         data = {"restored": {}}
-        for table in self.tables_to_restore:
-            backup_file = os.path.join(self.backup_directory, f"{table}.sql.gz")
-            if os.path.exists(backup_file):
-                output = self.execute(
-                    "set -o pipefail && "
-                    f"gunzip -c '{backup_file}' | "
-                    f"{db_client_cli()} -h {self.host} -P {self.db_port} -u {self.user} -p{self.password} "
-                    f"{self.database}",
-                    executable="/bin/bash",
-                )
-                data["restored"][table] = output
+        with self._db_client_credentials() as credentials:
+            for table in self.tables_to_restore:
+                backup_file = os.path.join(self.backup_directory, f"{table}.sql.gz")
+                if os.path.exists(backup_file):
+                    output = self.execute(
+                        "set -o pipefail && "
+                        f"gunzip -c '{backup_file}' | "
+                        f"{db_client_cli()} {credentials} -h {self.host} -P {self.db_port} "
+                        f"{self.database}",
+                        executable="/bin/bash",
+                    )
+                    data["restored"][table] = output
 
         dropped_tables = self.drop_new_tables()
         data.update(dropped_tables)
@@ -837,12 +857,13 @@ class Site(Base):
     def drop_new_tables(self):
         new_tables = set(self.tables) - set(self.previous_tables)
         data = {"dropped": {}}
-        for table in new_tables:
-            output = self.execute(
-                f"{db_client_cli()} -h {self.host} -P {self.db_port} -u {self.user} -p{self.password} "
-                f"{self.database} -e 'DROP TABLE `{table}`'"
-            )
-            data["dropped"][table] = output
+        with self._db_client_credentials() as credentials:
+            for table in new_tables:
+                output = self.execute(
+                    f"{db_client_cli()} {credentials} -h {self.host} -P {self.db_port} "
+                    f"{self.database} -e 'DROP TABLE `{table}`'"
+                )
+                data["dropped"][table] = output
         return data
 
     @step("Pause Scheduler")
@@ -927,20 +948,22 @@ print(">>>" + frappe.session.sid + "<<<")
             " defkey = 'time_zone' and parent = '__default'"
         )
         try:
-            timezone = self.execute(
-                f"{db_client_cli()} -h {self.host} -P {self.db_port} -u{self.database} -p{self.password} "
-                f'--connect-timeout 3 -sN -e "{query}"'
-            )["output"].strip()
+            with self._db_client_credentials(user=self.database) as credentials:
+                timezone = self.execute(
+                    f"{db_client_cli()} {credentials} -h {self.host} -P {self.db_port} "
+                    f'--connect-timeout 3 -sN -e "{query}"'
+                )["output"].strip()
         except Exception:
             timezone = ""
         return timezone
 
     @property
     def tables(self):
-        return self.execute(
-            f"{db_client_cli()} --disable-column-names -B -e 'SHOW TABLES' "
-            f"-h {self.host} -P {self.db_port} -u {self.user} -p{self.password} {self.database}"
-        )["output"].split("\n")
+        with self._db_client_credentials() as credentials:
+            return self.execute(
+                f"{db_client_cli()} {credentials} --disable-column-names -B -e 'SHOW TABLES' "
+                f"-h {self.host} -P {self.db_port} {self.database}"
+            )["output"].split("\n")
 
     @property
     def touched_tables(self):
@@ -978,11 +1001,11 @@ print(">>>" + frappe.session.sid + "<<<")
         try:
             # shell=True; quote every site_config-derived value so a password/host
             # with shell metacharacters can't execute in the agent process.
-            value = self.execute(
-                f"{db_client_cli()} -h {quote(self.host)} -P {quote(str(self.db_port))} "
-                f"-u{quote(self.user)} -p{quote(self.password)} "
-                f"--connect-timeout 3 -sN -e {quote(query)}"
-            )["output"].strip()
+            with self._db_client_credentials() as credentials:
+                value = self.execute(
+                    f"{db_client_cli()} {credentials} -h {quote(self.host)} -P {quote(str(self.db_port))} "
+                    f"--connect-timeout 3 -sN -e {quote(query)}"
+                )["output"].strip()
         except Exception:
             return True
         return value == "1"
@@ -1515,17 +1538,18 @@ print(">>>" + frappe.session.sid + "<<<")
         optimized_tables = []
         failed_optimizations = []
 
-        for table in tables:
-            query = f"OPTIMIZE TABLE `{table}`"
-            try:
-                self.execute(
-                    f"{db_client_cli()} -sN -h {self.host} -P {self.db_port} "
-                    f"-u{self.user} -p{self.password} {self.database} -e '{query}'"
-                )
-                optimized_tables.append(table)
-            except:  # noqa # pylint: disable=bare-except
-                failed_optimizations.append(table)
-                continue
+        with self._db_client_credentials() as credentials:
+            for table in tables:
+                query = f"OPTIMIZE TABLE `{table}`"
+                try:
+                    self.execute(
+                        f"{db_client_cli()} {credentials} -sN -h {self.host} -P {self.db_port} "
+                        f"{self.database} -e '{query}'"
+                    )
+                    optimized_tables.append(table)
+                except:  # noqa # pylint: disable=bare-except
+                    failed_optimizations.append(table)
+                    continue
 
         if not tables:
             return {"output": "No tables require optimization."}
@@ -1640,9 +1664,9 @@ print(">>>" + frappe.session.sid + "<<<")
                 raise Exception("Press Meta is disabled for database size calculation")
 
             query = f'SELECT size FROM press_meta.schema_sizes WHERE `schema` = "{self.database}"'
-            command = f"{db_client_cli()} -sN -h {self.host} -P {self.db_port} \
-                    -u{self.user} -p{self.password} -e '{query}'"
-            database_size = self.execute(command).get("output")
+            with self._db_client_credentials() as credentials:
+                command = f"{db_client_cli()} {credentials} -sN -h {self.host} -P {self.db_port} -e '{query}'"
+                database_size = self.execute(command).get("output")
 
         except Exception:
             # Fallback to old way if press_meta is not available
@@ -1655,9 +1679,9 @@ print(">>>" + frappe.session.sid + "<<<")
                 f' WHERE `table_schema` = "{self.database}"'
                 " GROUP BY `table_schema`"
             )
-            command = f"{db_client_cli()} -sN -h {self.host} -P {self.db_port} \
-                -u{self.user} -p{self.password} -e '{query}'"
-            database_size = self.execute(command).get("output")
+            with self._db_client_credentials() as credentials:
+                command = f"{db_client_cli()} {credentials} -sN -h {self.host} -P {self.db_port} -e '{query}'"
+                database_size = self.execute(command).get("output")
 
         try:
             assert database_size is not None, "Could not fetch database size"
@@ -1707,8 +1731,9 @@ print(">>>" + frappe.session.sid + "<<<")
             f' WHERE `table_schema` = "{self.database}"'
             " GROUP BY `table_schema`"
         )
-        command = f"{db_client_cli()} -sN -h {self.host} -P {self.db_port} -u{self.user} -p{self.password} -e '{query}'"  # noqa: E501
-        database_size = self.execute(command).get("output")
+        with self._db_client_credentials() as credentials:
+            command = f"{db_client_cli()} {credentials} -sN -h {self.host} -P {self.db_port} -e '{query}'"
+            database_size = self.execute(command).get("output")
 
         try:
             return int(database_size)
@@ -1725,8 +1750,9 @@ print(">>>" + frappe.session.sid + "<<<")
                 " AND ((`data_free` / (`data_length` + `index_length`)) > 0.2"
                 " OR `data_free` > 100 * 1024 * 1024)"
             )
-            command = f"{db_client_cli()} -sN -h {self.host} -P {self.db_port} -u{self.user} -p{self.password} -e '{query}'"  # noqa: E501
-            output = self.execute(command).get("output")
+            with self._db_client_credentials() as credentials:
+                command = f"{db_client_cli()} {credentials} -sN -h {self.host} -P {self.db_port} -e '{query}'"
+                output = self.execute(command).get("output")
             return [line.split("\t") for line in output.splitlines()]
         except Exception:
             return []
@@ -1830,3 +1856,8 @@ print(">>>" + frappe.session.sid + "<<<")
         self.bench_execute(
             "execute frappe.website.doctype.website_theme.website_theme.generate_theme_files_if_not_exist"
         )
+
+
+def _option_file_value(value: str) -> str:
+    """A value for a double-quoted MariaDB option-file entry"""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
