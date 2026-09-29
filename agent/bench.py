@@ -18,7 +18,7 @@ from pathlib import Path, PurePath
 from random import choices
 from textwrap import indent
 from typing import TYPE_CHECKING, TypedDict
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -59,6 +59,18 @@ if not frappe._dev_server:
 from frappe.utils.bench_helper import main
 main()
 """
+
+
+def split_url_credentials(url: str) -> tuple[str, str | None]:
+    """(url without user:password, git credential input for them); (url, None) when there are none"""
+    parsed = urlparse(url)
+    if not parsed.password:
+        return url, None
+    host = parsed.hostname or ""
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    clean = parsed._replace(netloc=host).geturl()
+    return clean, f"username={unquote(parsed.username or '')}\npassword={unquote(parsed.password)}\n"
 
 
 class Bench(Base):
@@ -1177,29 +1189,44 @@ class Bench(Base):
         app_path = os.path.join("apps", app["app"])
         exec = partial(self.docker_execute, subdir=app_path)
 
-        self.set_git_remote(app["app"], app["url"], remote)
+        # A private source's URL carries a GitHub token (https://x-access-token:<token>@…). execute()
+        # records every command in the step data and the worker's stdout log, and `ps` shows it, so
+        # the remote gets the URL without credentials and git reads them from a 0600 file in the
+        # container through a credential helper; both are removed however this ends.
+        url, credentials = split_url_credentials(app["url"])
+        credentials_file = f"/tmp/.inplace-credentials-{self.get_random_string(12)}"
+        git = "git"
+        try:
+            if credentials:
+                exec(f"sh -c 'umask 077 && cat > {credentials_file}'", input=credentials)
+                # git runs the helper as `<helper> get|store|erase`; answer `get` only
+                helper = shlex.quote(
+                    f'credential.helper=!f() {{ test "$1" = get && cat {credentials_file}; }}; f'
+                )
+                git = f"git -c credential.helper= -c {helper}"
 
-        app_path: str = os.path.join("apps", app["app"])
-        new_hash: str = app["hash"]
-        old_hash: str = exec("git rev-parse HEAD")["output"]
+            self.set_git_remote(app["app"], url, remote)
 
-        if old_hash == new_hash:
+            new_hash: str = app["hash"]
+            old_hash: str = exec("git rev-parse HEAD")["output"]
+
+            if old_hash == new_hash:
+                return []
+
+            # Fetch new hash and get changed files
+            exec(f"{git} fetch --depth 1 {remote} {new_hash}")
+            diff: str = exec(f"git diff --name-only {old_hash} {new_hash}")["output"]
+
+            # Ensure repo is not dirty and checkout next_hash
+            exec(f"git reset --hard {old_hash}")
+            exec("git clean -fd")
+            exec(f"git checkout {new_hash}")
+            return [s for s in diff.split("\n") if s]
+        finally:
             # Remove remote, url might be private
-            exec(f"git remote remove {remote}")
-            return []
-
-        # Fetch new hash and get changed files
-        exec(f"git fetch --depth 1 {remote} {new_hash}")
-        diff: str = exec(f"git diff --name-only {old_hash} {new_hash}")["output"]
-
-        # Ensure repo is not dirty and checkout next_hash
-        exec(f"git reset --hard {old_hash}")
-        exec("git clean -fd")
-        exec(f"git checkout {new_hash}")
-
-        # Remove remote, url might be private
-        exec(f"git remote remove {remote}")
-        return [s for s in diff.split("\n") if s]
+            exec(f"git remote remove {remote}", non_zero_throw=False)
+            if credentials:
+                exec(f"rm -f {credentials_file}", non_zero_throw=False)
 
     def set_git_remote(
         self,
@@ -1207,22 +1234,14 @@ class Bench(Base):
         url: str,
         remote: str,
     ):
+        # Replace the remote rather than compare it first: `git remote get-url` would put a URL left
+        # behind by an older run, token included, into the recorded output.
         app_path = os.path.join("apps", app)
-        res = self.docker_execute(
-            f"git remote get-url {remote}",
+        self.docker_execute(
+            f"git remote remove {remote}",
             subdir=app_path,
             non_zero_throw=False,
         )
-
-        if res["output"] == url:
-            return
-
-        if res["returncode"] == 0:
-            self.docker_execute(
-                f"git remote remove {remote}",
-                subdir=app_path,
-            )
-
         self.docker_execute(
             f"git remote add {remote} {url}",
             subdir=app_path,
