@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import inspect
 import json
 import logging
 import os
@@ -71,6 +72,27 @@ def save(wrapped, instance: Action, args, kwargs):
     instance.model.save()
 
 
+def argument_names(function, args, kwargs) -> dict:
+    """The names of the arguments a job was called with, never their values.
+
+    A job's arguments can carry secrets (a bench's Redis password in its config, site and
+    database passwords), and the job store keeps a row's earlier versions in its WAL and free
+    pages after the row has been overwritten. The values travel to the worker through RQ.
+    """
+    try:
+        params = [
+            p.name
+            for p in inspect.signature(function).parameters.values()
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+    except (TypeError, ValueError):
+        params = []
+    return {
+        "args": [params[i] if i < len(params) else f"arg{i}" for i in range(len(args))],
+        "kwargs": sorted(kwargs),
+    }
+
+
 class Action:
     if TYPE_CHECKING:
         model: Model | None
@@ -129,8 +151,7 @@ class Job(Action):
         self.model.data = json.dumps(
             {
                 "function": function.__func__.__name__,
-                "args": args,
-                "kwargs": kwargs,
+                **argument_names(function, args, kwargs),
             },
             default=str,
             sort_keys=True,
@@ -147,7 +168,11 @@ class Job(Action):
     def stop(self):
         send_stop_job_command(self.redis, self.job.get_id())
         self.job.refresh()
-        self.model.data = json.dumps(self.job.to_dict(), default=str)
+        data = self.job.to_dict()
+        # The pickled call and its description carry the job's arguments
+        data.pop("data", None)
+        data.pop("description", None)
+        self.model.data = json.dumps(data, default=str)
         self.model.status = "Failure"
         self.end()
 
