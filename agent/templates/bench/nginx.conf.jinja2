@@ -62,6 +62,15 @@ geo $realip_remote_addr $bypasses_proxy_{{ bench_name_slug }} {
 	default 1;
 	{{ proxy_ip }} 0;
 }
+
+# what to do with a request that bypassed the proxy: Let's Encrypt's HTTP-01 challenges go to the
+# challenge host (as the proxy's own port-80 block sends them), so custom-domain certificates still
+# renew once a domain is in this bench's server_name; everything else goes back over https
+map "$bypasses_proxy_{{ bench_name_slug }}:$uri" $bypass_target_{{ bench_name_slug }} {
+	default "";
+	"~^1:/\.well-known/acme-challenge/" "acme";
+	"~^1:" "https";
+}
 {%- endif %}
 
 # server blocks
@@ -270,8 +279,12 @@ server {
 	root {{ sites_directory }};
 
 	{% if proxy_ip -%}
-	# send anything that didn't come through the proxy back through it, over https
-	if ($bypasses_proxy_{{ bench_name_slug }}) {
+	# send anything that didn't come through the proxy back through it: ACME challenges to the
+	# challenge host, everything else over https
+	if ($bypass_target_{{ bench_name_slug }} = "acme") {
+		return 301 http://ssl.{{ domain }}$request_uri;
+	}
+	if ($bypass_target_{{ bench_name_slug }} = "https") {
 		return 301 https://$host$request_uri;
 	}
 	{%- endif %}
