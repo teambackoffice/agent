@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, TypedDict
 
@@ -146,11 +147,20 @@ def check_python_syntax(dirpath: str, target_python: str | None = None) -> str:
         # imports the code in the build.
         return ""
     command = f"{_python} -m compileall -q -o 0 {dirpath}"
-    proc = subprocess.run(
-        shlex.split(command),
-        text=True,
-        capture_output=True,
-    )
+    # Write the bytecode outside the build context. Each .pyc embeds its source path, which includes
+    # this build's name, so .pyc files left in the context differ on every build: Docker's cache key
+    # for each app's install step covers the whole bind-mounted app directory, untracked files
+    # included, so every app layer from frappe onwards was rebuilt (and re-pushed) on every build.
+    pycache_prefix = tempfile.mkdtemp(prefix="agent-syntax-check-")
+    try:
+        proc = subprocess.run(
+            shlex.split(command),
+            text=True,
+            capture_output=True,
+            env={**os.environ, "PYTHONPYCACHEPREFIX": pycache_prefix},
+        )
+    finally:
+        shutil.rmtree(pycache_prefix, ignore_errors=True)
     if proc.returncode == 0:
         return ""
 
