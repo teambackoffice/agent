@@ -303,6 +303,11 @@ server {
 server {
 	listen 127.0.0.1:10090;
 	location / {
+		# TBO fork: an unknown name under GrowthX's root domain goes to the GrowthX website, not to this
+		# Press's dashboard (white-label). Every other unknown name keeps Press's behaviour.
+		if ($host ~* "\.tbogrowthx\.com$") {
+			return 302 https://tbogrowthx.com/site-not-found?site=$host;
+		}
 		return 307 https://{{ domain }}/dashboard/#/sites/new?domain=$host;
 	}
 }
