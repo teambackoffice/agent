@@ -122,14 +122,27 @@
     </div>
     <p class="footer">
       Site owner? Resolve the issues with your plan from the
-      <a class="dashboard-url" href="https://frappecloud.com/dashboard"
+      <a class="dashboard-url" href="https://tbocloud.in/dashboard"
         >dashboard</a
       >.
     </p>
     <script>
       // the dashboard link needs the site name, which only the browser knows here
       document.querySelector(".dashboard-url").href =
-        `https://frappecloud.com/dashboard/sites/${window.location.hostname}`;
+        `https://tbocloud.in/dashboard/sites/${window.location.hostname}`;
+    </script>
+      <script>
+      // TBO fork: GrowthX customer sites get GrowthX's wording and support details, not the hosting
+      // platform's dashboard or Frappe's troubleshooting guides (white-label). Other sites are unchanged.
+      if (/\.tbogrowthx\.com$/i.test(window.location.hostname)) {
+        document.querySelectorAll(".button").forEach((el) => el.remove());
+        const footer = document.querySelector(".footer");
+        if (footer) {
+          footer.innerHTML =
+            'Need help? Sign in at <a href="https://tbogrowthx.com/login">tbogrowthx.com</a> ' +
+            'or email <a href="mailto:support@tbogrowthx.com">support@tbogrowthx.com</a>.';
+        }
+      }
     </script>
   </body>
 </html>
