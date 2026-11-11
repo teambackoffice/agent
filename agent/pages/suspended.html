@@ -119,17 +119,20 @@
           payment failure.
         </p>
       </div>
+      <a class="button pay-now" href="https://india.teambackoffice.com/site_payment"
+        >Pay now</a
+      >
     </div>
     <p class="footer">
-      Site owner? Resolve the issues with your plan from the
-      <a class="dashboard-url" href="https://tbocloud.in/dashboard"
-        >dashboard</a
-      >.
+      If this is because of an unpaid invoice, paying it restores the site
+      within minutes. For anything else, email support@teambackoffice.com.
     </p>
     <script>
-      // the dashboard link needs the site name, which only the browser knows here
-      document.querySelector(".dashboard-url").href =
-        `https://tbocloud.in/dashboard/sites/${window.location.hostname}`;
+      // TBO fork: "Pay now" opens the billing site's payment page for this site; that page shows the unpaid
+      // invoice and its PayU link only when the site is suspended for one (it needs the name the browser used)
+      document.querySelector(".pay-now").href =
+        "https://india.teambackoffice.com/site_payment?site=" +
+        encodeURIComponent(window.location.hostname);
     </script>
       <script>
       // TBO fork: GrowthX customer sites get GrowthX's wording and support details, not the hosting
